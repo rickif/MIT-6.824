@@ -31,7 +31,7 @@ func init() {
 }
 
 const (
-	HeartbeatInterval = time.Millisecond * 20
+	HeartbeatInterval = time.Millisecond * 50
 	ElectionTimeout   = 10 * HeartbeatInterval
 )
 
@@ -79,7 +79,7 @@ type Raft struct {
 }
 
 func genElectionTimeout() time.Duration {
-	return ElectionTimeout * time.Duration(rand.Intn(20)) / 10
+	return ElectionTimeout * time.Duration(rand.Intn(200)/100)
 }
 
 func getHeartbeatInterval() time.Duration {
@@ -274,7 +274,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	log.Printf("RequestVote, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.VoteGranted, ok)
+	//log.Printf("RequestVote, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.VoteGranted, ok)
 	return ok
 }
 
@@ -311,7 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.Success, ok)
+	//log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.Success, ok)
 	return ok
 }
 
@@ -349,6 +349,7 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) followerLoop() {
+	log.Printf("server %d in follower loop", rf.getMe())
 	timeout := genElectionTimeout()
 	tick := time.Tick(timeout)
 	for range tick {
@@ -389,7 +390,7 @@ func (rf *Raft) candidateLoop() {
 				if !rf.sendRequestVote(server, args, reply) {
 					reply.VoteGranted = false
 					reply.Term = term
-					log.Printf("server %d not reply RequestVote request\n", i)
+					log.Printf("server %d not reply RequestVote request from %d\n", server, me)
 				}
 				ch <- reply
 				wg.Done()
@@ -430,7 +431,7 @@ func (rf *Raft) leaderLoop() {
 		if i == me {
 			continue
 		}
-		go func(ctx context.Context) {
+		go func(ctx context.Context, server int) {
 			for {
 				select {
 				case <-ctx.Done():
@@ -441,17 +442,16 @@ func (rf *Raft) leaderLoop() {
 						LeaderID: me,
 					}
 					reply := &AppendEntriesReply{}
-					if !rf.sendAppendEntries(i, args, reply) {
-						log.Printf("server %d not response Heartbeat\n", i)
+					if !rf.sendAppendEntries(server, args, reply) {
+						log.Printf("server %d not response Heartbeat from %d\n", server, me)
 					}
 					if !reply.Success {
 						rf.setTerm(reply.Term)
 						rf.transitionState(StateFollower)
 					}
 				}
-
 			}
-		}(ctx)
+		}(ctx, i)
 	}
 	for range time.Tick(interval) {
 		if rf.getState() != StateLeader {
