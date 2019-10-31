@@ -79,7 +79,7 @@ type Raft struct {
 }
 
 func genElectionTimeout() time.Duration {
-	return ElectionTimeout * time.Duration(rand.Intn(200)/100)
+	return ElectionTimeout*time.Duration(rand.Intn(200))/100 + ElectionTimeout
 }
 
 func getHeartbeatInterval() time.Duration {
@@ -233,6 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	votedFor := rf.getVotedFor()
+	rf.setLastHeartbeat(time.Now())
 
 	if votedFor == args.CandidateID || votedFor == -1 {
 		reply.VoteGranted = true
@@ -311,7 +312,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	//log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.Success, ok)
+	log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.Success, ok)
 	return ok
 }
 
@@ -361,6 +362,8 @@ func (rf *Raft) followerLoop() {
 		}
 		lastHB := rf.getLastHeartbeat()
 		if time.Since(lastHB) > timeout {
+			log.Println("lastHB: ", lastHB)
+			log.Println("cost: ", time.Since(lastHB))
 			rf.transitionState(StateCandidate)
 			return
 		}
@@ -374,12 +377,12 @@ func (rf *Raft) candidateLoop() {
 	me := rf.getMe()
 	peerCnt := len(rf.getPeers())
 	timeout := genElectionTimeout()
-	log.Printf("server %d in candidate, term: %d", me, rf.getTerm())
 	for {
 		if rf.getState() != StateCandidate {
 			return
 		}
 		rf.incrTerm()
+		log.Printf("server %d in candidate, term: %d", me, rf.getTerm())
 		var wg sync.WaitGroup
 
 		ch := make(chan *RequestVoteReply, peerCnt)
@@ -401,7 +404,6 @@ func (rf *Raft) candidateLoop() {
 					reply.Term = term
 					log.Printf("server %d not reply RequestVote request from %d\n", server, me)
 				}
-				log.Printf("%d -> %d, ok: %v", me, server, reply.VoteGranted)
 				ch <- reply
 				wg.Done()
 			}(i)
@@ -456,6 +458,7 @@ func (rf *Raft) leaderLoop() {
 					reply := &AppendEntriesReply{}
 					if !rf.sendAppendEntries(server, args, reply) {
 						log.Printf("server %d not response Heartbeat from %d\n", server, me)
+						continue
 					}
 					if !reply.Success {
 						rf.setTerm(reply.Term)
