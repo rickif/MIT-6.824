@@ -299,7 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	} else if args.Term > term {
-		rf.setTerm(term)
+		rf.setTerm(args.Term)
 		rf.transitionState(StateFollower)
 	}
 
@@ -349,7 +349,10 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) followerLoop() {
-	log.Printf("server %d in follower loop", rf.getMe())
+	if rf.getState() != StateFollower {
+		return
+	}
+	log.Printf("server %d in follower loop, term: %d", rf.getMe(), rf.getTerm())
 	timeout := genElectionTimeout()
 	tick := time.Tick(timeout)
 	for range tick {
@@ -365,9 +368,13 @@ func (rf *Raft) followerLoop() {
 }
 
 func (rf *Raft) candidateLoop() {
+	if rf.getState() != StateCandidate {
+		return
+	}
 	me := rf.getMe()
 	peerCnt := len(rf.getPeers())
 	timeout := genElectionTimeout()
+	log.Printf("server %d in candidate, term: %d", me, rf.getTerm())
 	for {
 		if rf.getState() != StateCandidate {
 			return
@@ -376,11 +383,13 @@ func (rf *Raft) candidateLoop() {
 		var wg sync.WaitGroup
 
 		ch := make(chan *RequestVoteReply, peerCnt)
-		wg.Add(peerCnt)
+		wg.Add(peerCnt - 1)
 		term := rf.getTerm()
-		log.Printf("server %d in candidate, term=%d", me, term)
 
 		for i := 0; i < peerCnt; i++ {
+			if me == i {
+				continue
+			}
 			go func(server int) {
 				args := &RequestVoteArgs{
 					Term:        term,
@@ -392,24 +401,27 @@ func (rf *Raft) candidateLoop() {
 					reply.Term = term
 					log.Printf("server %d not reply RequestVote request from %d\n", server, me)
 				}
+				log.Printf("%d -> %d, ok: %v", me, server, reply.VoteGranted)
 				ch <- reply
 				wg.Done()
 			}(i)
 		}
 
 		wg.Wait()
-		votesWin := 0
-		for i := 0; i < peerCnt; i++ {
+		votesWin := 1
+		for i := 0; i < peerCnt-1; i++ {
 			reply := <-ch
 			if reply.VoteGranted == true {
 				votesWin++
 			} else if reply.Term > term {
+				rf.setTerm(reply.Term)
 				rf.transitionState(StateFollower)
 				return
 			}
 		}
 
 		if votesWin > peerCnt/2 {
+			log.Printf("server %d get %d votes\n", me, votesWin)
 			rf.transitionState(StateLeader)
 			return
 		}
@@ -426,7 +438,7 @@ func (rf *Raft) leaderLoop() {
 	interval := getHeartbeatInterval()
 	peerCnt := len(rf.getPeers())
 	ctx, cancel := context.WithCancel(context.Background())
-	log.Printf("server %d in leader loop", me)
+	log.Printf("server %d in leader loop, term: %d", me, term)
 	for i := 0; i < peerCnt; i++ {
 		if i == me {
 			continue
