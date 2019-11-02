@@ -31,7 +31,7 @@ func init() {
 }
 
 const (
-	HeartbeatInterval = time.Millisecond * 50
+	HeartbeatInterval = time.Millisecond * 20
 	ElectionTimeout   = 10 * HeartbeatInterval
 )
 
@@ -60,6 +60,7 @@ const (
 	StateFollower  RaftState = iota + 1000
 	StateCandidate RaftState = iota + 1000
 	StateLeader    RaftState = iota + 1000
+	StateStop      RaftState = iota + 1000
 )
 
 type Raft struct {
@@ -79,7 +80,7 @@ type Raft struct {
 }
 
 func genElectionTimeout() time.Duration {
-	return ElectionTimeout*time.Duration(rand.Intn(200))/100 + ElectionTimeout
+	return ElectionTimeout * time.Duration(rand.Intn(200)+20) / 100
 }
 
 func getHeartbeatInterval() time.Duration {
@@ -119,6 +120,7 @@ func (rf *Raft) setLastHeartbeat(t time.Time) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.lastHeartBeat = t
+	//	log.Printf("server %d lastHeartbeat: %v", rf.me, t)
 }
 
 func (rf *Raft) incrTerm() {
@@ -311,8 +313,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	//rpcID := time.Now().UnixNano()
+	//log.Printf("AppendEntries, %d -> %d, term: %d, rpcID: %v\n", rf.me, server, args.Term, rpcID)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v\n", rf.me, server, reply.Success, ok)
+	//log.Printf("AppendEntries, %d -> %d, reply: %v, ok: %v, term: %d, rpcID: %d\n", rf.me, server, reply.Success, ok, reply.Term, rpcID)
 	return ok
 }
 
@@ -347,6 +351,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.transitionState(StateStop)
 }
 
 func (rf *Raft) followerLoop() {
@@ -360,10 +365,14 @@ func (rf *Raft) followerLoop() {
 		if rf.getState() != StateFollower {
 			return
 		}
+		//starttime := time.Now()
+		//log.Println("getLastHeartbeat() before", starttime)
 		lastHB := rf.getLastHeartbeat()
+		//endtime := time.Now()
+		//log.Println("getLastHeartbeat() after", endtime, "cost: ", endtime.Sub(starttime))
 		if time.Since(lastHB) > timeout {
-			log.Println("lastHB: ", lastHB)
-			log.Println("cost: ", time.Since(lastHB))
+			//log.Println("lastHB: ", lastHB)
+			//log.Println("interval: ", time.Since(lastHB))
 			rf.transitionState(StateCandidate)
 			return
 		}
@@ -383,10 +392,8 @@ func (rf *Raft) candidateLoop() {
 		}
 		rf.incrTerm()
 		log.Printf("server %d in candidate, term: %d", me, rf.getTerm())
-		var wg sync.WaitGroup
 
 		ch := make(chan *RequestVoteReply, peerCnt)
-		wg.Add(peerCnt - 1)
 		term := rf.getTerm()
 
 		for i := 0; i < peerCnt; i++ {
@@ -405,29 +412,34 @@ func (rf *Raft) candidateLoop() {
 					log.Printf("server %d not reply RequestVote request from %d\n", server, me)
 				}
 				ch <- reply
-				wg.Done()
 			}(i)
 		}
 
-		wg.Wait()
-		votesWin := 1
-		for i := 0; i < peerCnt-1; i++ {
-			reply := <-ch
-			if reply.VoteGranted == true {
-				votesWin++
-			} else if reply.Term > term {
-				rf.setTerm(reply.Term)
-				rf.transitionState(StateFollower)
-				return
-			}
-		}
+		timer := time.After(timeout)
 
-		if votesWin > peerCnt/2 {
-			log.Printf("server %d get %d votes\n", me, votesWin)
-			rf.transitionState(StateLeader)
-			return
+		votesWin := 1
+		for {
+			select {
+			case <-timer:
+				log.Printf("server %d election timeout, votesWin: %d", me, votesWin)
+				break
+			case reply := <-ch:
+				if reply.VoteGranted == true {
+					votesWin++
+					if votesWin > peerCnt/2 {
+						log.Printf("server %d get %d votes\n", me, votesWin)
+						rf.transitionState(StateLeader)
+						return
+					}
+				} else if reply.Term > term {
+					rf.setTerm(reply.Term)
+					rf.transitionState(StateFollower)
+					return
+				}
+
+			}
+
 		}
-		time.Sleep(timeout)
 	}
 }
 
@@ -441,34 +453,47 @@ func (rf *Raft) leaderLoop() {
 	peerCnt := len(rf.getPeers())
 	ctx, cancel := context.WithCancel(context.Background())
 	log.Printf("server %d in leader loop, term: %d", me, term)
+	ch := make(chan *AppendEntriesReply)
 	for i := 0; i < peerCnt; i++ {
 		if i == me {
 			continue
 		}
 		go func(ctx context.Context, server int) {
+			// chan to limit send heart beat request goroutine
+			limit := make(chan struct{}, 10)
 			for {
 				select {
 				case <-ctx.Done():
+					//log.Println(me, " Done: ", ctx.Err())
 					return
 				case <-time.After(interval):
-					args := &AppendEntriesArgs{
-						Term:     term,
-						LeaderID: me,
-					}
-					reply := &AppendEntriesReply{}
-					if !rf.sendAppendEntries(server, args, reply) {
-						log.Printf("server %d not response Heartbeat from %d\n", server, me)
-						continue
-					}
-					if !reply.Success {
-						rf.setTerm(reply.Term)
-						rf.transitionState(StateFollower)
-					}
+					go func() {
+						limit <- struct{}{}
+						args := &AppendEntriesArgs{
+							Term:     term,
+							LeaderID: me,
+						}
+						reply := &AppendEntriesReply{}
+						if !rf.sendAppendEntries(server, args, reply) {
+							log.Printf("server %d not response Heartbeat from %d, my term: %d\n", server, me, term)
+						} else {
+							ch <- reply
+						}
+						<-limit
+					}()
 				}
 			}
 		}(ctx, i)
 	}
-	for range time.Tick(interval) {
+
+	for reply := range ch {
+		//log.Printf("server reply.Success: %v, replyTerm: %v, term: %v, result: %v\n", reply.Success, reply.Term, term, !reply.Success && reply.Term > term)
+		if !reply.Success && reply.Term > term {
+			rf.setTerm(reply.Term)
+			rf.transitionState(StateFollower)
+			cancel()
+			return
+		}
 		if rf.getState() != StateLeader {
 			cancel()
 			return
