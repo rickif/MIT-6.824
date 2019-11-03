@@ -60,8 +60,14 @@ const (
 	StateFollower  RaftState = iota + 1000
 	StateCandidate RaftState = iota + 1000
 	StateLeader    RaftState = iota + 1000
-	StateStop      RaftState = iota + 1000
 )
+
+/*
+type RaftLog struct {
+	Term int
+	Log string
+}
+*/
 
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -77,6 +83,15 @@ type Raft struct {
 	state         RaftState
 	votedFor      int
 	lastHeartBeat time.Time
+	/*
+	log []RaftLog
+
+	commitIndex int
+	lastApplied int
+
+	nextIndex []int
+	matchIndex []int
+	*/
 }
 
 func genElectionTimeout() time.Duration {
@@ -351,7 +366,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.transitionState(StateStop)
 }
 
 func (rf *Raft) followerLoop() {
