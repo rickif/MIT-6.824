@@ -62,12 +62,10 @@ const (
 	StateLeader    RaftState = iota + 1000
 )
 
-/*
 type RaftLog struct {
 	Term int
-	Log string
+	Log  string
 }
-*/
 
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -83,15 +81,13 @@ type Raft struct {
 	state         RaftState
 	votedFor      int
 	lastHeartBeat time.Time
-	/*
-	log []RaftLog
+	log           []RaftLog
 
 	commitIndex int
 	lastApplied int
 
-	nextIndex []int
+	nextIndex  []int
 	matchIndex []int
-	*/
 }
 
 func genElectionTimeout() time.Duration {
@@ -178,6 +174,42 @@ func (rf *Raft) getPeers() []*labrpc.ClientEnd {
 	return rf.peers
 }
 
+func (rf *Raft) getLog(i int) (RaftLog, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.log) <= i {
+		return RaftLog{}, false
+	}
+	return rf.log[i], true
+}
+
+func (rf *Raft) getLastLog() (RaftLog, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.log[len(rf.log)-1], len(rf.log)
+}
+
+func (rf *Raft) appendLog(logs []RaftLog, preLogIndex int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if preLogIndex < len(rf.log)-1 {
+		rf.log = rf.log[:preLogIndex+1]
+	}
+	rf.log = append(rf.log, logs...)
+}
+
+func (rf *Raft) updateCommitIndex(leaderCommit int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if leaderCommit > rf.commitIndex {
+		if leaderCommit > len(rf.log)-1 {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = leaderCommit
+		}
+	}
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -215,8 +247,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
-	CandidateID int
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -241,7 +275,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+	lastLog, lastLogIndex := rf.getLastLog()
+
 	if args.Term < term {
+		reply.VoteGranted = false
+		return
+	} else if args.LastLogTerm < lastLog.Term {
+		reply.VoteGranted = false
+		return
+	} else if args.LastLogTerm == lastLog.Term && args.LastLogIndex < lastLogIndex {
 		reply.VoteGranted = false
 		return
 	} else if args.Term > term {
@@ -297,8 +339,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderID int
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []RaftLog
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -316,13 +362,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < term {
 		reply.Success = false
 		return
+	} else if log, ok := rf.getLog(args.PrevLogIndex); !ok || log.Term != args.PrevLogTerm {
+		reply.Success = false
+		return
 	} else if args.Term > term {
 		rf.setTerm(args.Term)
 		rf.transitionState(StateFollower)
+		rf.setLastHeartbeat(time.Now())
+		reply.Success = true
+		return
 	}
 
-	rf.setLastHeartbeat(time.Now())
+	rf.appendLog(args.Entries, args.PrevLogIndex)
+	rf.updateCommitIndex(args.LeaderCommit)
 
+	rf.setLastHeartbeat(time.Now())
 	reply.Success = true
 	return
 }
@@ -409,6 +463,7 @@ func (rf *Raft) candidateLoop() {
 
 		ch := make(chan *RequestVoteReply, peerCnt)
 		term := rf.getTerm()
+		lastLog, lastLogIndex := rf.getLastLog()
 
 		for i := 0; i < peerCnt; i++ {
 			if me == i {
@@ -416,8 +471,10 @@ func (rf *Raft) candidateLoop() {
 			}
 			go func(server int) {
 				args := &RequestVoteArgs{
-					Term:        term,
-					CandidateID: me,
+					Term:         term,
+					CandidateID:  me,
+					LastLogTerm:  lastLog.Term,
+					LastLogIndex: lastLogIndex,
 				}
 				reply := &RequestVoteReply{}
 				if !rf.sendRequestVote(server, args, reply) {
