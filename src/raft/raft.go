@@ -63,8 +63,8 @@ const (
 )
 
 type RaftLog struct {
-	Term int
-	Log  string
+	Term    int
+	Command interface{}
 }
 
 type Raft struct {
@@ -189,7 +189,7 @@ func (rf *Raft) getLastLog() (RaftLog, int) {
 	return rf.log[len(rf.log)-1], len(rf.log)
 }
 
-func (rf *Raft) appendLog(logs []RaftLog, preLogIndex int) {
+func (rf *Raft) appendFollowerLog(logs []RaftLog, preLogIndex int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if preLogIndex < len(rf.log)-1 {
@@ -208,6 +208,10 @@ func (rf *Raft) updateCommitIndex(leaderCommit int) {
 			rf.commitIndex = leaderCommit
 		}
 	}
+}
+
+func (rf *Raft) appendLog(log RaftLog) int {
+	rf.mu.Lock()
 }
 
 //
@@ -373,7 +377,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.appendLog(args.Entries, args.PrevLogIndex)
+	rf.appendFollowerLog(args.Entries, args.PrevLogIndex)
 	rf.updateCommitIndex(args.LeaderCommit)
 
 	rf.setLastHeartbeat(time.Now())
@@ -403,9 +407,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	if rf.getState() != StateLeader {
+		return 0, 0, false
+	}
 
 	// Your code here (2B).
 
@@ -604,6 +608,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = StateFollower
 	rf.votedFor = -1
 	rf.lastHeartBeat = time.Now()
+	initLog := RaftLog{
+		Term:    0,
+		Command: "init",
+	}
+	rf.log = append(rf.log, initLog)
 
 	go rf.Loop()
 
