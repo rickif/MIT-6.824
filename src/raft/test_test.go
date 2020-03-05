@@ -124,6 +124,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
+	fmt.Printf("%v disconnect...\n", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
@@ -135,6 +136,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+	fmt.Printf("%v connect...\n", (leader+1)%servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
@@ -155,9 +157,13 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
+	fmt.Printf("%v is the leader\n", leader)
 	cfg.disconnect((leader + 1) % servers)
+	fmt.Printf("%v disconnect...\n", (leader+1)%servers)
 	cfg.disconnect((leader + 2) % servers)
+	fmt.Printf("%v disconnect...\n", (leader+2)%servers)
 	cfg.disconnect((leader + 3) % servers)
+	fmt.Printf("%v disconnect...\n", (leader+3)%servers)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
@@ -167,6 +173,8 @@ func TestFailNoAgree2B(t *testing.T) {
 		t.Fatalf("expected index 2, got %v", index)
 	}
 
+	fmt.Println("log in right index 2")
+
 	time.Sleep(2 * RaftElectionTimeout)
 
 	n, _ := cfg.nCommitted(index)
@@ -174,15 +182,21 @@ func TestFailNoAgree2B(t *testing.T) {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
+	fmt.Println("cannot commited because of lost of majority")
+
 	// repair
 	cfg.connect((leader + 1) % servers)
+	fmt.Printf("%v reconnect...\n", (leader+1)%servers)
 	cfg.connect((leader + 2) % servers)
+	fmt.Printf("%v reconnect...\n", (leader+2)%servers)
 	cfg.connect((leader + 3) % servers)
+	fmt.Printf("%v reconnect...\n", (leader+3)%servers)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	// or perhaps
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("%v is the new leader\n", leader2)
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
@@ -190,6 +204,8 @@ func TestFailNoAgree2B(t *testing.T) {
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
+
+	fmt.Println("log commited in right index 2")
 
 	cfg.one(1000, servers)
 
@@ -308,7 +324,9 @@ func TestRejoin2B(t *testing.T) {
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("%v is the leader\n", leader1)
 	cfg.disconnect(leader1)
+	fmt.Printf("leader %v disconnect\n", leader1)
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -320,15 +338,19 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("%v is the new leader\n", leader2)
 	cfg.disconnect(leader2)
+	fmt.Printf("leader %v disconnect\n", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
+	fmt.Printf("old leader1 %v reconnect\n", leader1)
 
 	cfg.one(104, 2)
 
 	// all together now
 	cfg.connect(leader2)
+	fmt.Printf("old leader2 %v reconnect\n", leader2)
 
 	cfg.one(105, servers)
 
