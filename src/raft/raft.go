@@ -28,7 +28,10 @@ import (
 const (
 	HeartbeatInterval    = time.Millisecond * 100
 	HeartbeatTimeout     = time.Millisecond * 100
-	AppendEntriesTimeout = time.Millisecond * 500
+	ElectionTimeoutBase  = time.Millisecond * 300
+	AppendEntriesTimeout = time.Millisecond * 300
+
+	ReplyChanSize = 16
 )
 
 // import "bytes"
@@ -70,11 +73,10 @@ type Raft struct {
 	logs        []LogEntry
 
 	//VolatileState
-	commitIndex  int
-	lastApplied  int
-	newApplied   chan ApplyMsg
-	newAppended  chan struct{}
-	newCommitted chan struct{}
+	commitIndex int
+	lastApplied int
+	applyCh     chan ApplyMsg
+	appendEvent chan struct{}
 
 	//LeaderState
 	nextIndex  map[int]int
@@ -178,10 +180,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term, -1)
 	}
 
-	DPrintf("%d request vote, term: %d\n", args.CandidateID, args.Term)
-	DPrintf("%d has voted for %d, term: %d\n", rf.me, rf.votedFor, rf.currentTerm)
-
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateID && args.Term == term {
+		DPrintf("%d request vote, term: %d\n", args.CandidateID, args.Term)
+		DPrintf("%d has voted for %d, term: %d\n", rf.me, rf.votedFor, rf.currentTerm)
 		return
 	}
 
@@ -288,9 +289,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.isCandidate() {
 		rf.becomeFollower(args.Term, args.LeaderID)
-		reply.Success = true
 		rf.cancel()
-		return
+		reply.Success = true
 	}
 
 	// handle entries
@@ -361,17 +361,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	lastLogID := rf.appendEntry(entry)
 	DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v, logs: %v", rf.me, rf.currentTerm, command, lastLogID, rf.logs)
 
-	/*
-		nc := rf.NewCommitted()
-		for {
-			select {
-			case <-nc:
-			}
-			nc = rf.NewCommitted()
-			if lastLogID <= rf.CommitIndex() {
-				break
-			}
-		}*/
 	_, nextIndex := rf.lastLog()
 	return nextIndex, term, isLeader
 }
@@ -400,22 +389,25 @@ func (rf *Raft) Kill() {
 // for any long-running work.
 //
 
-func (rf *Raft) NewCommit() {
-	close(rf.newCommitted)
-	rf.newCommitted = make(chan struct{})
-}
-
-func (rf *Raft) NewCommitted() <-chan struct{} {
-	return rf.newCommitted
+func (rf *Raft) newAppend() {
+	close(rf.appendEvent)
+	rf.appendEvent = make(chan struct{})
 }
 
 func (rf *Raft) NewAppend() {
-	close(rf.newAppended)
-	rf.newAppended = make(chan struct{})
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.newAppend()
+}
+
+func (rf *Raft) newAppended() <-chan struct{} {
+	return rf.appendEvent
 }
 
 func (rf *Raft) NewAppended() <-chan struct{} {
-	return rf.newAppended
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.newAppended()
 }
 
 func (rf *Raft) ElectionTimeout() time.Duration {
@@ -428,8 +420,8 @@ func (rf *Raft) ResetElectionTimedout() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rand.Seed(time.Now().UnixNano())
-	r := rand.Intn(200)
-	rf.electionTimeout = 2*HeartbeatInterval + time.Duration(r)*time.Millisecond
+	r := rand.Intn(300)
+	rf.electionTimeout = ElectionTimeoutBase + time.Duration(r)*time.Millisecond
 }
 
 func (rf *Raft) ResetElectionDeadline() {
@@ -508,7 +500,7 @@ func (rf *Raft) maybeApplyEntry() {
 			Command: entry.Cmd,
 		}
 
-		rf.newApplied <- applyMsg
+		rf.applyCh <- applyMsg
 		DPrintf("%v new applied %v, logs: %v", rf.me, rf.lastApplied, rf.logs)
 	}
 }
@@ -546,6 +538,16 @@ func (rf *Raft) LastLog() (LogEntry, int) {
 func (rf *Raft) lastLog() (LogEntry, int) {
 	lastLog := rf.logs[len(rf.logs)-1]
 	return lastLog, len(rf.logs) - 1
+}
+
+func (rf *Raft) MaybeBecomeLeader() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.status == RaftStatus_Candidate {
+		rf.status = RaftStatus_Leader
+	} else {
+		rf.status = RaftStatus_Follower
+	}
 }
 
 func (rf *Raft) BecomeLeader() {
@@ -633,7 +635,7 @@ func (rf *Raft) AppendEntry(entry LogEntry) int {
 
 func (rf *Raft) appendEntry(entries ...LogEntry) int {
 	rf.logs = append(rf.logs, entries...)
-	rf.NewAppend()
+	rf.newAppend()
 	return len(rf.logs) - 1
 }
 
@@ -650,6 +652,9 @@ func (rf *Raft) TruncateLog(id int) {
 }
 
 func (rf *Raft) truncateLog(id int) {
+	if id+1 > len(rf.logs) {
+		return
+	}
 	rf.logs = rf.logs[:id+1]
 }
 
@@ -733,12 +738,14 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 	me := rf.Me()
 	count := len(rf.Peers())
 	for rf.IsCandidate() {
-		DPrintf("%v candidate... term: %v", rf.Me(), rf.currentTerm)
+		DPrintf("%v candidate... term: %v", rf.me, rf.currentTerm)
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+
+		rf.ResetElectionTimedout()
 
 		rf.mu.Lock()
 		entry, id := rf.lastLog()
@@ -779,9 +786,6 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case res := <-resCh:
-				if term != rf.Term() {
-					return
-				}
 				if res.Term > rf.Term() {
 					rf.BecomeFollower(res.Term, -1)
 					rf.cancel()
@@ -790,17 +794,18 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 
 				if res.VoteGranted {
 					votes++
+					if votes > count/2 {
+						rf.MaybeBecomeLeader()
+						rf.cancel()
+						return
+					}
 				}
 			}
+
 		}
-		if votes > count/2 {
-			if term == rf.Term() {
-				rf.BecomeLeader()
-			}
+		if err := rf.Wait4ElectionTimeout(ctx); err != nil {
 			return
 		}
-		rf.ResetElectionTimedout()
-		time.Sleep(rf.ElectionTimeout())
 	}
 }
 
@@ -824,9 +829,8 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 		}
 
 		go func(peer int) {
-			matched := false
-
 			na := rf.NewAppended()
+			rf.NewAppend()
 
 			timer := time.NewTimer(HeartbeatInterval)
 			defer timer.Stop()
@@ -839,21 +843,16 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 				}
 
 				index := rf.NextIndex(peer)
-				_, lastLogIndex := rf.LastLog()
 				var entries []LogEntry
-				for index > lastLogIndex && matched {
-					select {
-					case <-ctx.Done():
-						return
-					case <-na:
-						na = rf.NewAppended()
-						index = rf.NextIndex(peer)
-						_, lastLogIndex = rf.LastLog()
-						entries = rf.LogAfter(index)
-					case <-timer.C:
-						index = rf.NextIndex(peer)
-						_, lastLogIndex = rf.LastLog()
-					}
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-na:
+					na = rf.NewAppended()
+					entries = rf.LogAfter(index)
+				case <-timer.C:
+					timer.Reset(HeartbeatInterval)
 				}
 
 				prevEntry := rf.Log(index - 1)
@@ -868,6 +867,7 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 					PrevLogIndex: index - 1,
 					PrevLogTerm:  prevEntry.Term,
 				}
+
 				reply := &AppendEntriesReply{}
 				ctx, cancel := context.WithTimeout(ctx, AppendEntriesTimeout)
 				if !rf.sendAppendEntries(ctx, peer, args, reply) {
@@ -887,18 +887,12 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 					}
 					rf.SetNextIndex(peer, index-1)
 				} else {
+					rf.SetNextIndex(peer, index+len(entries))
+					rf.SetMatchIndex(peer, index+len(entries)-1)
 					if len(entries) > 0 {
-						rf.SetNextIndex(peer, index+len(entries))
-						rf.SetMatchIndex(peer, index+len(entries)-1)
 						newMatched <- struct{}{}
-						matched = true
 					}
 				}
-
-				if !timer.Stop() {
-					<-timer.C
-				}
-				timer.Reset(HeartbeatInterval)
 			}
 		}(peer)
 	}
@@ -936,7 +930,6 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 			if matched > count/2 {
 				rf.SetCommitIndex(i)
 				DPrintf("leader %v new commit index: %v", rf.me, i)
-				rf.NewCommit()
 				rf.MaybeApplyEntry()
 				break
 			}
@@ -947,16 +940,16 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:        peers,
-		me:           me,
-		persister:    persister,
-		commitIndex:  0,
-		lastApplied:  0,
-		newApplied:   applyCh,
-		newAppended:  make(chan struct{}),
-		newCommitted: make(chan struct{}),
-		// init with a empty log
-		logs:   []LogEntry{{0, nil}},
+		peers:     peers,
+		me:        me,
+		persister: persister,
+
+		logs: []LogEntry{{0, nil}},
+
+		applyCh: applyCh,
+
+		appendEvent: make(chan struct{}),
+
 		closed: make(chan struct{}),
 	}
 
