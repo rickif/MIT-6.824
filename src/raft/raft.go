@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -33,9 +35,6 @@ const (
 
 	ReplyChanSize = 16
 )
-
-// import "bytes"
-// import "encoding/gob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -112,15 +111,36 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+
+type PersistState struct {
+	CommitIndex    int
+	LastCommitTerm int
+	Logs           []LogEntry
+}
+
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+
+	rf.mu.Lock()
+	commitIndex := rf.commitIndex
+	log := rf.log(commitIndex)
+	lastCommitTerm := log.Term
+	logs := rf.logAfter(commitIndex)
+	rf.mu.Unlock()
+
+	state := PersistState{
+		CommitIndex:    rf.commitIndex,
+		LastCommitTerm: lastCommitTerm,
+		Logs:           logs,
+	}
+
+	enc.Encode(state)
+
+	data := buf.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -128,14 +148,21 @@ func (rf *Raft) persist() {
 //
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+
+	state := PersistState{}
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	dec.Decode(&state)
+
+	rf.mu.Lock()
+	rf.logs = state.Logs
+	rf.commitIndex = state.CommitIndex
+	log, _ := rf.lastLog()
+	rf.currentTerm = log.Term
+	rf.mu.Unlock()
 }
 
 //
@@ -639,10 +666,14 @@ func (rf *Raft) appendEntry(entries ...LogEntry) int {
 	return len(rf.logs) - 1
 }
 
+func (rf *Raft) logAfter(id int) []LogEntry {
+	return rf.logs[id:]
+}
+
 func (rf *Raft) LogAfter(id int) []LogEntry {
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	return rf.logs[id:]
+	return rf.logAfter(id)
 }
 
 func (rf *Raft) TruncateLog(id int) {

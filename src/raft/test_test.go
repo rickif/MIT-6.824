@@ -551,15 +551,18 @@ func TestPersist12C(t *testing.T) {
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i)
+		fmt.Printf("%v restart from crash...\n", i)
 	}
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 		cfg.connect(i)
+		fmt.Printf("%v reconnect...\n", i)
 	}
 
 	cfg.one(12, servers)
 
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("%v is the new leader...\n", leader1)
 	cfg.disconnect(leader1)
 	cfg.start1(leader1)
 	cfg.connect(leader1)
