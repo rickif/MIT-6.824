@@ -368,9 +368,13 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("%v is the leader...\n", leader1)
 	cfg.disconnect((leader1 + 2) % servers)
+	fmt.Printf("%v follower disconnect... in partion1\n", (leader1+2)%servers)
 	cfg.disconnect((leader1 + 3) % servers)
+	fmt.Printf("%v follower disconnect... in partion1\n", (leader1+3)%servers)
 	cfg.disconnect((leader1 + 4) % servers)
+	fmt.Printf("%v follower disconnect... in partion1\n", (leader1+4)%servers)
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -380,12 +384,17 @@ func TestBackup2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout / 2)
 
 	cfg.disconnect((leader1 + 0) % servers)
+	fmt.Printf("%v leader disconnect... in partion0\n", (leader1+0)%servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	fmt.Printf("%v follower disconnect... in partion0\n", (leader1+1)%servers)
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
+	fmt.Printf("%v follower reconnect... in partion1\n", (leader1+2)%servers)
 	cfg.connect((leader1 + 3) % servers)
+	fmt.Printf("%v follower reconnect... in partion1\n", (leader1+3)%servers)
 	cfg.connect((leader1 + 4) % servers)
+	fmt.Printf("%v follower reconnect... in partion1\n", (leader1+4)%servers)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -394,11 +403,13 @@ func TestBackup2B(t *testing.T) {
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("%v is the leader... in partion1\n", leader2)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	fmt.Printf("%v follower disconnect... in partion1\n", other)
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -412,8 +423,11 @@ func TestBackup2B(t *testing.T) {
 		cfg.disconnect(i)
 	}
 	cfg.connect((leader1 + 0) % servers)
+	fmt.Printf("%v leader reconnect... in partion0\n", (leader1+0)%servers)
 	cfg.connect((leader1 + 1) % servers)
+	fmt.Printf("%v follower reconnect... in partion0\n", (leader1+1)%servers)
 	cfg.connect(other)
+	fmt.Printf("%v follower reconnect... in partion0\n", other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -423,6 +437,7 @@ func TestBackup2B(t *testing.T) {
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
+		fmt.Printf("%v reconnect... all\n", other)
 	}
 	cfg.one(rand.Int(), servers)
 

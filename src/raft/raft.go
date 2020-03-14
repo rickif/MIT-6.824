@@ -388,7 +388,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	lastLogID := rf.leaderAppendLogEntry(entry)
-	DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v, logs: %v", rf.me, rf.currentTerm, command, lastLogID, rf.logs)
 
 	return lastLogID, term, isLeader
 }
@@ -530,7 +529,6 @@ func (rf *Raft) maybeApplyEntry() {
 		}
 
 		rf.applyCh <- applyMsg
-		DPrintf("%v new applied %v, logs: %v", rf.me, rf.lastApplied, rf.logs)
 	}
 }
 
@@ -944,7 +942,6 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 					continue
 				}
 				cancel()
-				DPrintf("args: %v, reply: %v", args, reply)
 
 				if !reply.Success {
 					if reply.Term > rf.Term() {
