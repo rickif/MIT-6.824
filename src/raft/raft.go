@@ -225,8 +225,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	rf.becomeFollower(args.Term, args.CandidateID)
 	rf.resetElectionDeadline()
+	rf.becomeFollower(args.Term, args.CandidateID)
+	rf.cancel()
 	reply.VoteGranted = true
 	return
 }
@@ -388,6 +389,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	lastLogID := rf.leaderAppendLogEntry(entry)
+	DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v, logs: %v", rf.me, rf.currentTerm, command, lastLogID, rf.logs)
 
 	return lastLogID, term, isLeader
 }
@@ -467,20 +469,22 @@ func (rf *Raft) ElectionDeadline() time.Time {
 	return rf.electionDeadline
 }
 
-func (rf *Raft) Wait4ElectionTimeout() <-chan time.Time {
-	c := make(chan time.Time)
-	go func() {
-		ticker := time.NewTicker(rf.ElectionTimeout())
-		defer ticker.Stop()
-		for range ticker.C {
+func (rf *Raft) Wait4ElectionTimeout(ctx context.Context) bool {
+	ticker := time.NewTicker(rf.ElectionTimeout())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-rf.closed:
+			return false
+		case <-ticker.C:
 			if rf.ElectionDeadline().Before(time.Now()) {
 				// election timeout fire
-				c <- time.Now()
-				return
+				return true
 			}
 		}
-	}()
-	return c
+	}
 }
 
 func (rf *Raft) CommitIndex() int {
@@ -529,6 +533,7 @@ func (rf *Raft) maybeApplyEntry() {
 		}
 
 		rf.applyCh <- applyMsg
+		DPrintf("%v new applied %v, logs: %v", rf.me, rf.lastApplied, rf.logs)
 	}
 }
 
@@ -795,10 +800,13 @@ func (rf *Raft) FollowerLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-rf.Wait4ElectionTimeout():
-			rf.BecomeCandidate()
+		default:
+		}
+		if !rf.Wait4ElectionTimeout(ctx) {
 			return
 		}
+		rf.BecomeCandidate()
+		return
 	}
 }
 
@@ -848,7 +856,9 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 		}
 
 		votes := 1
-		for peer := 0; peer < count-1; peer++ {
+		timer := time.NewTimer(rf.ElectionTimeout())
+	Loop:
+		for {
 			select {
 			case <-ctx.Done():
 				return
@@ -867,9 +877,11 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 						return
 					}
 				}
+			case <-timer.C:
+				break Loop
 			}
 		}
-		<-rf.Wait4ElectionTimeout()
+		timer.Stop()
 	}
 }
 
@@ -919,7 +931,7 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 				entries = rf.LogAfter(index)
 				prevEntry, ok := rf.Log(index - 1)
 				if !ok {
-					lastlog := rf.lastLog()
+					lastlog := rf.LastLog()
 					rf.SetNextIndex(peer, lastlog.Index+1)
 					continue
 				}
@@ -942,6 +954,8 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 					continue
 				}
 				cancel()
+
+				DPrintf("send entries, args :%v, reply: %v", args, reply)
 
 				if !reply.Success {
 					if reply.Term > rf.Term() {

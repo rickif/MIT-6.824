@@ -437,7 +437,7 @@ func TestBackup2B(t *testing.T) {
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
-		fmt.Printf("%v reconnect... all\n", other)
+		fmt.Printf("%v reconnect... all\n", i)
 	}
 	cfg.one(rand.Int(), servers)
 
