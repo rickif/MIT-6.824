@@ -76,6 +76,7 @@ type Raft struct {
 	//VolatileState
 	commitIndex int
 	lastApplied int
+	lastIndex   int
 	applyCh     chan ApplyMsg
 	appendEvent chan struct{}
 
@@ -126,12 +127,10 @@ func (rf *Raft) persist() {
 	buf := new(bytes.Buffer)
 	enc := gob.NewEncoder(buf)
 
-	rf.mu.Lock()
 	commitIndex := rf.commitIndex
 	log, _ := rf.log(commitIndex)
 	lastCommitTerm := log.Term
-	logs := rf.logAfter(commitIndex)
-	rf.mu.Unlock()
+	logs := rf.logAfter(1)
 
 	state := PersistState{
 		CommitIndex:    rf.commitIndex,
@@ -142,6 +141,7 @@ func (rf *Raft) persist() {
 	enc.Encode(state)
 
 	data := buf.Bytes()
+	DPrintf("state: %v", state)
 	rf.persister.SaveRaftState(data)
 }
 
@@ -151,6 +151,7 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		DPrintf("no persist data")
 		return
 	}
 
@@ -159,12 +160,17 @@ func (rf *Raft) readPersist(data []byte) {
 	dec := gob.NewDecoder(buf)
 	dec.Decode(&state)
 
-	rf.mu.Lock()
-	rf.logs = state.Logs
 	rf.commitIndex = state.CommitIndex
-	log := rf.lastLog()
-	rf.currentTerm = log.Term
-	rf.mu.Unlock()
+	if len(state.Logs) > 0 {
+		rf.logs = state.Logs
+		log := rf.lastLog()
+		rf.currentTerm = log.Term
+		rf.lastIndex = log.Index
+	} else {
+		rf.currentTerm = state.LastCommitTerm
+		rf.lastIndex = state.CommitIndex
+	}
+	DPrintf("%v load persiter state, term: %v, commiteIndex: %v, logs: %v", rf.me, rf.currentTerm, rf.commitIndex, rf.logs)
 }
 
 //
@@ -207,6 +213,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	} else if args.Term > term {
 		rf.becomeFollower(args.Term, -1)
+		if !rf.isFollower() {
+			rf.cancel()
+		}
 	}
 
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateID && args.Term == term {
@@ -313,15 +322,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else if args.Term > term {
 		// remote term is bigger than local
-		rf.becomeFollower(args.Term, args.LeaderID)
+		rf.becomeFollower(args.Term, -1)
+		if !rf.isFollower() {
+			rf.cancel()
+		}
 	}
 	rf.resetElectionDeadline()
-
-	if rf.isCandidate() {
-		rf.becomeFollower(args.Term, args.LeaderID)
-		rf.cancel()
-		reply.Success = true
-	}
 
 	prevLog, ok := rf.log(args.PrevLogIndex)
 	if !ok {
@@ -533,6 +539,7 @@ func (rf *Raft) maybeApplyEntry() {
 		}
 
 		rf.applyCh <- applyMsg
+		rf.persist()
 		DPrintf("%v new applied %v, logs: %v", rf.me, rf.lastApplied, rf.logs)
 	}
 }
@@ -676,7 +683,8 @@ func (rf *Raft) followerAppendLogEntries(entries []LogEntry) int {
 	rf.newAppend()
 
 	lastLog := rf.lastLog()
-	return lastLog.Index
+	rf.lastIndex = lastLog.Index
+	return rf.lastIndex
 }
 
 func (rf *Raft) LeaderAppendLogEntry(entry LogEntry) int {
@@ -686,8 +694,8 @@ func (rf *Raft) LeaderAppendLogEntry(entry LogEntry) int {
 }
 
 func (rf *Raft) leaderAppendLogEntry(entry LogEntry) int {
-	lastLog := rf.lastLog()
-	entry.Index = lastLog.Index + 1
+	rf.lastIndex++
+	entry.Index = rf.lastIndex
 
 	rf.logs = append(rf.logs, entry)
 
@@ -719,6 +727,7 @@ func (rf *Raft) maybeTruncateLog(id int) {
 	}
 
 	rf.logs = rf.logs[:index+1]
+	rf.lastIndex = rf.lastLog().Index
 }
 
 func (rf *Raft) Log(idx int) (LogEntry, bool) {
@@ -996,6 +1005,8 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 			if !ok {
 				break
 			}
+
+			// leader only commit log in current term
 			if entry.Term != rf.Term() {
 				break
 			}
@@ -1030,6 +1041,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor:    -1,
 		commitIndex: 0,
 		lastApplied: 0,
+		lastIndex:   0,
+		logs:        nil,
+
+		nextIndex:  nil,
+		matchIndex: nil,
 
 		applyCh: applyCh,
 
