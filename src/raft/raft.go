@@ -205,8 +205,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = term
 	if args.Term < term {
 		return
-	} else if args.Term > term {
+	} else if args.Term > term || rf.isCandidate() {
 		rf.becomeFollower(args.Term, -1)
+		rf.resetElectionDeadline()
 	}
 
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateID && args.Term == term {
@@ -333,6 +334,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// truncate log when the pervious log'term and index is matched
 	rf.maybeTruncateLog(args.PrevLogIndex)
 
 	if len(args.Entries) > 0 {
@@ -983,6 +985,7 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 				break
 			}
 			if entry.Term != rf.Term() {
+				// only commit the entries in current term
 				break
 			}
 
