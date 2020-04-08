@@ -614,34 +614,51 @@ func TestPersist22C(t *testing.T) {
 	for iters := 0; iters < 5; iters++ {
 		cfg.one(10+index, servers)
 		index++
+		fmt.Printf("client send cmd: %v, servers: %v\n", 10+index, servers)
 
 		leader1 := cfg.checkOneLeader()
+		fmt.Printf("%v become leader\n", leader1)
 
 		cfg.disconnect((leader1 + 1) % servers)
+		fmt.Printf("follower %v disconnected\n", (leader1+1)%servers)
 		cfg.disconnect((leader1 + 2) % servers)
+		fmt.Printf("follower %v disconnected\n", (leader1+2)%servers)
 
 		cfg.one(10+index, servers-2)
+		fmt.Printf("client send cmd: %v, servers: %v\n", 10+index, servers-2)
 		index++
 
 		cfg.disconnect((leader1 + 0) % servers)
+		fmt.Printf("leader %v disconnected\n", (leader1)%servers)
 		cfg.disconnect((leader1 + 3) % servers)
+		fmt.Printf("follower %v disconnected\n", (leader1+3)%servers)
 		cfg.disconnect((leader1 + 4) % servers)
+		fmt.Printf("follower %v disconnected\n", (leader1+4)%servers)
 
 		cfg.start1((leader1 + 1) % servers)
+		fmt.Printf("follower %v restarted\n", (leader1+1)%servers)
 		cfg.start1((leader1 + 2) % servers)
+		fmt.Printf("follower %v restarted\n", (leader1+2)%servers)
 		cfg.connect((leader1 + 1) % servers)
+		fmt.Printf("follower %v reconnected\n", (leader1+1)%servers)
 		cfg.connect((leader1 + 2) % servers)
+		fmt.Printf("follower %v reconnected\n", (leader1+2)%servers)
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1 + 3) % servers)
+		fmt.Printf("follower %v restarted\n", (leader1+3)%servers)
 		cfg.connect((leader1 + 3) % servers)
+		fmt.Printf("follower %v reconnected\n", (leader1+3)%servers)
 
 		cfg.one(10+index, servers-2)
+		fmt.Printf("client send cmd: %v, servers: %v\n", 10+index, servers-2)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
+		fmt.Printf("follower %v reconnected\n", (leader1+4)%servers)
 		cfg.connect((leader1 + 0) % servers)
+		fmt.Printf("follower %v reconnected\n", (leader1+0)%servers)
 	}
 
 	cfg.one(1000, servers)
