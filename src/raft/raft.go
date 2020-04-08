@@ -77,7 +77,6 @@ type Raft struct {
 	//VolatileState
 	commitIndex int
 	lastApplied int
-	lastIndex   int
 	applyCh     chan ApplyMsg
 	appendEvent chan struct{}
 
@@ -117,10 +116,9 @@ func (rf *Raft) GetState() (int, bool) {
 //
 
 type PersistState struct {
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Logs              []LogEntry
-	State             interface{}
+	CurrentTerm int
+	VotedFor    int
+	Logs        []LogEntry
 }
 
 func (rf *Raft) persist() {
@@ -129,20 +127,14 @@ func (rf *Raft) persist() {
 	buf := new(bytes.Buffer)
 	enc := gob.NewEncoder(buf)
 
-	lastAppliedIndex := rf.lastApplied
-	lastAppliedLog, _ := rf.log(lastAppliedIndex)
-	lastAppliedTerm := lastAppliedLog.Term
-	logs := rf.logAfter(lastAppliedIndex + 1)
-
 	state := PersistState{
-		LastIncludedIndex: lastAppliedIndex,
-		LastIncludedTerm:  lastAppliedTerm,
-		Logs:              logs,
-		State:             lastAppliedLog.Cmd,
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+		Logs:        rf.logs,
 	}
 
 	enc.Encode(&state)
-	DPrintf("%v new state: %v", rf.Me(), state)
+	//DPrintf("%v new state: %v", rf.Me(), state)
 
 	data := buf.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -164,24 +156,9 @@ func (rf *Raft) readPersist(data []byte) {
 	dec.Decode(&state)
 	DPrintf("%v load state: %v", rf.Me(), state)
 
-	var lastLog LogEntry
-	if len(state.Logs) > 0 {
-		rf.logs = state.Logs
-		lastLog = rf.lastLog()
-		rf.state = state.State
-	} else {
-		lastLog = LogEntry{
-			Index: state.LastIncludedIndex,
-			Term:  state.LastIncludedTerm,
-		}
-		rf.logs = []LogEntry{lastLog}
-	}
-
-	rf.currentTerm = lastLog.Term
-	rf.commitIndex = state.LastIncludedIndex
-	rf.lastApplied = state.LastIncludedIndex
-
-	DPrintf("%v load persiter state, term: %v, commiteIndex: %v, logs: %v", rf.me, rf.currentTerm, rf.commitIndex, rf.logs)
+	rf.currentTerm = state.CurrentTerm
+	rf.votedFor = state.VotedFor
+	rf.logs = state.Logs
 }
 
 //
@@ -552,7 +529,6 @@ func (rf *Raft) maybeApplyEntry() {
 
 		rf.applyCh <- applyMsg
 		rf.state = entry.Cmd
-		rf.persist()
 		DPrintf("%v new applied %v, logs: %v", rf.me, rf.lastApplied, rf.logs)
 	}
 }
@@ -573,6 +549,12 @@ func (rf *Raft) Term() int {
 
 func (rf *Raft) setTerm(term int) {
 	rf.currentTerm = term
+	rf.persist()
+}
+
+func (rf *Raft) increTerm() {
+	rf.currentTerm++
+	rf.persist()
 }
 
 func (rf *Raft) SetTerm(term int) {
@@ -639,6 +621,7 @@ func (rf *Raft) becomeFollower(term, leaderID int) {
 	}
 	rf.votedFor = leaderID
 	rf.status = RaftStatus_Follower
+	rf.persist()
 }
 
 func (rf *Raft) Peers() []*labrpc.ClientEnd {
@@ -650,10 +633,16 @@ func (rf *Raft) VotedFor() int {
 	defer rf.mu.RUnlock()
 	return rf.votedFor
 }
+
 func (rf *Raft) VoteFor(candidateID int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.voteFor(candidateID)
+}
+
+func (rf *Raft) voteFor(candidateID int) {
 	rf.votedFor = candidateID
+	rf.persist()
 }
 
 func (rf *Raft) IsLeader() bool {
@@ -694,12 +683,12 @@ func (rf *Raft) FollowerAppendLogEntries(entries []LogEntry) int {
 
 func (rf *Raft) followerAppendLogEntries(entries []LogEntry) int {
 	rf.logs = append(rf.logs, entries...)
+	rf.persist()
 
 	rf.newAppend()
 
 	lastLog := rf.lastLog()
-	rf.lastIndex = lastLog.Index
-	return rf.lastIndex
+	return lastLog.Index
 }
 
 func (rf *Raft) LeaderAppendLogEntry(entry LogEntry) int {
@@ -709,10 +698,11 @@ func (rf *Raft) LeaderAppendLogEntry(entry LogEntry) int {
 }
 
 func (rf *Raft) leaderAppendLogEntry(entry LogEntry) int {
-	rf.lastIndex++
-	entry.Index = rf.lastIndex
+	lastLog := rf.lastLog()
+	entry.Index = lastLog.Index + 1
 
 	rf.logs = append(rf.logs, entry)
+	rf.persist()
 
 	rf.newAppend()
 
@@ -745,7 +735,7 @@ func (rf *Raft) maybeTruncateLog(id int) {
 	}
 
 	rf.logs = rf.logs[:index+1]
-	rf.lastIndex = rf.lastLog().Index
+	rf.persist()
 }
 
 func (rf *Raft) Log(idx int) (LogEntry, bool) {
@@ -851,10 +841,10 @@ func (rf *Raft) CandidateLoop(ctx context.Context) {
 
 		rf.mu.Lock()
 		lastLog := rf.lastLog()
-		rf.currentTerm++
+		rf.increTerm()
 		term := rf.currentTerm
 		rf.resetElectionDeadline()
-		rf.votedFor = me
+		rf.voteFor(me)
 		rf.mu.Unlock()
 		DPrintf("%v candidate... term: %v", rf.me, rf.currentTerm)
 
@@ -982,9 +972,11 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 				}
 				cancel()
 
-				if len(args.Entries) != 0 {
-					DPrintf("send entries, args :%v, reply: %v", args, reply)
-				}
+				/*
+					if len(args.Entries) != 0 {
+						DPrintf("send entries, args :%v, reply: %v", args, reply)
+					}
+				*/
 
 				if !reply.Success {
 					if reply.Term > rf.Term() {
@@ -1062,7 +1054,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor:    -1,
 		commitIndex: 0,
 		lastApplied: 0,
-		lastIndex:   0,
 		logs:        nil,
 
 		nextIndex:  nil,
@@ -1071,8 +1062,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		applyCh: applyCh,
 
 		appendEvent: make(chan struct{}),
-
-		closed: make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 
 	// initialize from state persisted before a crash
