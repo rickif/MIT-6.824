@@ -310,12 +310,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else if args.Term > term {
 		// remote term is bigger than local
-		rf.becomeFollower(args.Term, -1)
 		if !rf.isFollower() {
+			rf.becomeFollower(args.Term, -1)
 			rf.cancel()
 		}
+	} else {
+		rf.resetElectionDeadline()
 	}
-	rf.resetElectionDeadline()
 
 	prevLog, ok := rf.log(args.PrevLogIndex)
 	if !ok {
@@ -384,7 +385,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	lastLogID := rf.leaderAppendLogEntry(entry)
-	DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v, logs: %v", rf.me, rf.currentTerm, command, lastLogID, rf.logs)
+	//DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v, logs: %v", rf.me, rf.currentTerm, command, lastLogID, rf.logs)
+	DPrintf("%d append entry, term: %d , cmd: %v, will be commited :%v", rf.me, rf.currentTerm, command, lastLogID)
 
 	return lastLogID, term, isLeader
 }
@@ -972,11 +974,9 @@ func (rf *Raft) LeaderLoop(ctx context.Context) {
 				}
 				cancel()
 
-				/*
-					if len(args.Entries) != 0 {
-						DPrintf("send entries, args :%v, reply: %v", args, reply)
-					}
-				*/
+				if !reply.Success {
+					DPrintf("%v -> %v send entries failed, args :%v, reply: %v", me, peer, args, reply)
+				}
 
 				if !reply.Success {
 					if reply.Term > rf.Term() {

@@ -823,6 +823,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
+			fmt.Printf("%v disconnect\n", leader)
 			nup -= 1
 		}
 
@@ -830,6 +831,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
+				fmt.Printf("%v connect\n", s)
 				nup += 1
 			}
 		}
